@@ -353,6 +353,121 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("settles a recovered session when OpenCode reports idle without a turn id", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-resume-idle");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.status",
+          properties: {
+            sessionID: "ses_persisted_idle",
+            status: { type: "busy" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: {
+            sessionID: "ses_persisted_idle",
+            status: { type: "idle" },
+          },
+        },
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_persisted_idle" },
+      });
+      yield* advanceTestClock(10);
+
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      yield* adapter.stopSession(threadId);
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+
+      NodeAssert.equal(session?.status, "ready");
+      NodeAssert.equal(session?.activeTurnId, undefined);
+      const stateChanged = events.find((event) => event.type === "session.state.changed");
+      NodeAssert.ok(stateChanged);
+      if (stateChanged.type === "session.state.changed") {
+        NodeAssert.equal(stateChanged.payload.state, "ready");
+        NodeAssert.equal(stateChanged.turnId, undefined);
+      }
+      NodeAssert.equal(
+        events.some((event) => event.type === "turn.completed"),
+        false,
+      );
+    }),
+  );
+
+  it.effect("preserves an error when OpenCode reports idle afterward", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-error-then-idle");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.error",
+          properties: {
+            sessionID: "ses_error_then_idle",
+            error: { data: { message: "provider request failed" } },
+          },
+        },
+        {
+          type: "session.status",
+          properties: {
+            sessionID: "ses_error_then_idle",
+            status: { type: "busy" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: {
+            sessionID: "ses_error_then_idle",
+            status: { type: "idle" },
+          },
+        },
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_error_then_idle" },
+      });
+      yield* advanceTestClock(10);
+
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      yield* adapter.stopSession(threadId);
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+
+      NodeAssert.equal(session?.status, "error");
+      NodeAssert.equal(session?.lastError, "provider request failed");
+      NodeAssert.equal(
+        events.some(
+          (event) => event.type === "session.state.changed" && event.payload.state === "ready",
+        ),
+        false,
+      );
+      NodeAssert.equal(
+        events.some((event) => event.type === "turn.completed"),
+        false,
+      );
+    }),
+  );
+
   it.effect("sends follow-up turns to the resumed session id", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

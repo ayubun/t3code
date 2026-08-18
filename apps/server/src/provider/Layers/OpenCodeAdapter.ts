@@ -1050,7 +1050,9 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.status": {
-          if (event.properties.status.type === "busy") {
+          const hasSessionError =
+            context.session.status === "error" || context.session.lastError !== undefined;
+          if (event.properties.status.type === "busy" && !hasSessionError) {
             yield* updateProviderSession(context, {
               status: "running",
               activeTurnId: turnId,
@@ -1073,20 +1075,63 @@ export function makeOpenCodeAdapter(
             break;
           }
 
-          if (event.properties.status.type === "idle" && turnId) {
-            context.activeTurnId = undefined;
-            yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
-            yield* emit({
-              ...(yield* buildEventBase({
+          // Native logging can yield; do not clear a newer turn or a session error reported meanwhile.
+          if (
+            event.properties.status.type === "idle" &&
+            context.activeTurnId === turnId &&
+            !hasSessionError
+          ) {
+            if (!turnId) {
+              const updatedAt = yield* nowIso;
+              if (
+                context.activeTurnId !== turnId ||
+                context.session.status === "error" ||
+                context.session.lastError !== undefined
+              ) {
+                break;
+              }
+              const nextSession = {
+                ...context.session,
+                status: "ready" as const,
+                updatedAt,
+              } as ProviderSession & Record<string, unknown>;
+              const mutableSession = nextSession as Record<string, unknown>;
+              delete mutableSession.activeTurnId;
+              context.activeTurnId = undefined;
+              context.session = nextSession;
+              const eventBase = yield* buildEventBase({
                 threadId: context.session.threadId,
-                turnId,
                 raw: event,
-              })),
-              type: "turn.completed",
-              payload: {
-                state: "completed",
-              },
-            });
+              });
+              if (context.activeTurnId !== undefined || context.session !== nextSession) {
+                break;
+              }
+              yield* emit({
+                ...eventBase,
+                type: "session.state.changed",
+                payload: {
+                  state: "ready",
+                },
+              });
+            } else {
+              context.activeTurnId = undefined;
+              yield* updateProviderSession(
+                context,
+                { status: "ready" },
+                { clearActiveTurnId: true },
+              );
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  raw: event,
+                })),
+                type: "turn.completed",
+                payload: {
+                  state: "completed",
+                },
+              });
+            }
           }
           break;
         }
